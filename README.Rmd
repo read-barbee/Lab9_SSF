@@ -1,0 +1,632 @@
+---
+title: "WILD 562: Intro to Step Selection Functions"
+author: "Mark Hebblewhite and Eric Palm"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+require(knitr)
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, message = F)
+r <- getOption("repos")
+r["CRAN"] <- "https://ftp.osuosl.org/pub/cran/"
+options(repos = r)
+```
+
+# Introduction to Step Selection Functions
+
+In today’s lab we will explore the matched-case control sampling design for use-availability study designs with animal tracking data.  First pioneered by Compton et al. (2002) for the wood box tortoise, and later by Whittington et al. (2005) for wolves, the conditional logistic regression design has assumed a dominant role in the analysis of animal resource selection with GPS-type movement data (Fortin et al. 2005, Forester et al. 2009).   These have become called step-selection functions (SSF) in animal movement and spatial ecology. 
+
+Conditional logistic regression models are also known by many synonyms; matched-case control logistic regression, case-control, paired, and conditional logistic regression. All formulations estimate the same statistical model. Moreover, this model can be estimated either using its own direct likelihood formula (e.g., in packages like SAS or STATA) or, via the Cox proportional hazards model in R.  The proof that both likelihoods are equivalent is not difficult if you are a statistics PhD, but unimportant to ecologists. 
+
+![Figure 9.1. Step selection function schematic](Figures/SSF.png)
+
+Sampled locations (black circles in Figure 1 above) are paired with biologically realistic samples of ‘availability’ (n=4 in this case) given where the animal could have gone at time t=3 in this example. Random paired available points can be generated from the observed step length from t=3 to t=4, or the empirical step length and turning angle distribution for the vector of animal relocations along the entire path t = 1 to 4, in this case. This kind of sampling design overcomes many of the common problems of defining availability, and helps ensure that availability is defined from the animals perspective. 
+
+# Loading necessary packages
+
+The `amt` package (animal movement tools) is a new package that is very handy for a lot of resource selection analyses. [Here's a link](https://www.researchgate.net/publication/331112461_Animal_movement_tools_amt_R_package_for_managing_tracking_data_and_conducting_habitat_selection_analyses) to a recently published paper about `amt`.
+
+
+```{r eval=TRUE, message=FALSE, results='hide'}
+
+#function to install and load required packages
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+packages <- c("terra","sf","amt","mapview","tmap","tidyverse","survival","sjPlot","lme4")
+
+#run function to install packages
+ipak(packages)
+```
+
+# Biased-Correlated Random Walks
+
+_From Fagan and Calabrese - Bulletin of the Ecological Society of America 2014_
+
+The origins of Step Selection Functions stem from the earliest days of animal ecology with Skellam's classic 1950's paper.  But the field of movement ecology didnt really get started until field ecologists started working with theoretical physicists and ecologists to understand how to conceptualize movement based on ideal gas law theories.  These seminal studies were summarized by Peter Turchin in his landmark book, Quantitative Analysis of Animal Movement (Turchin 1999).   
+
+More than 30 years ago, an early, sturdy bridge between field data and spatial ecological theory was built when the article “Analyzing insect movement as a correlated random walk” was published in Oecologia. This paper, which represented a collaboration between ecologist Peter Kareiva and mathematician Nanako Shigesada, is a milestone along the Paper Trail because it marks a critical link between the abstract world of ecological theory and the hands-on way in which ecologists actually collect data on individual animals.
+
+This correlated random walk model was comprised of steps and turns, and Kareiva and Shigesada showed how one could estimate these distributions, and, make them functions of spatial or temporal covariates through field data.  The biased correlated random walk emerged, and represents the cornerstone of the step dplyr::selection function concept. And it links the mechanistic movement models of Moorcroft, Lewis and Barnett to field data approaches commonly collected with GPS data. 
+
+In this first excercise, we will explore how different 'parameters' of movement (step, turns) and bias towards a centroid influence the spatial pattern of movement.  In essence, the BCRW is the driver of the movement kernel distribution in the iSSF models we will use from the package amt. 
+
+First, we make a function that draws random movements based on 3 parameters, a, b, rho (the degree of correaltion), and an attraction to a home range activity center.  a and b are parameters of the step lenght distribution, fit as a Weibull distribution. Larger values of a or b represent more or less longer step lenghts.  Rho is the degree of directional persistence or 'bias' in the correlation in direction between steps, and the attraction is equivalent to the mathematical advection term in Moorcroft and Barnett.  
+
+Here, we will compare just 3 types of fits to explore, but I encourage you to play around with the paramters on your own to get a feel for unbiased and biased correlated random walks. 
+```{r crw}
+#### Correlated Random Walks
+BCRW <- function(a = 2, b = 1, rho = 0.7, Z.center = 0, attraction = 0.5, n = 50, Z0 = 0){
+  require(CircStats)
+  
+  Z <- c(Z0, rep(NA,n-1))
+  phi <- runif(1, -pi, pi)
+  for(i in 2:n)
+  {
+    # relative orientation to center of attraction
+    chi <- Arg(Z.center - Z[i-1])
+    dphi <- chi-phi
+    if(abs(chi - phi) > pi) dphi <- (chi - phi) - pi
+    
+    # adjust the location 
+    location <- phi + attraction * dphi
+    
+    # pick a new absolute direction ... but MUST BE BETWEEN -pi and pi
+    phi <- rwrpcauchy(1, location, rho) - 2*pi
+    if(phi > pi) phi <- phi-2*pi
+    if(phi < -pi) phi <- phi+2*pi
+    
+    Z[i] <- Z[i-1] + complex(arg = phi, mod = rweibull(1, a, b))
+  }
+  return(Z)
+}
+
+BCRW(a = 2, b = 1, rho = 0, Z.center = 10, attraction = 0.25, n = 2000) %>% 
+  plot(type="o", asp=1, pch = 21, bg= grey(seq(0,1,length = 2000)),
+       main = "a = 2, b = 1, rho = 0.2, attraction = 0")
+
+BCRW(a = 2, b = 1, rho = 0.5, Z.center = 10, attraction = 0.25, n = 2000) %>% 
+  plot(type="o", asp=1, pch = 21, bg= grey(seq(0,1,length = 200)),
+       main = "a = 2, b = 1, rho = 0.7, attraction = 0.5")
+
+BCRW(a = 2, b = 1, rho = 0.7, Z.center = 10, attraction = 0.25, n = 2000) %>% 
+  plot(type="o", asp=1, pch = 21, bg= grey(seq(0,1,length = 200 )),
+       main = "a = 2, b = 1, rho = 0.7, attraction = 0.8")
+
+```
+
+These three little simulations demonstrate the effects of varying correlation, or bias, in the step lengths for the same step length distribution (here, fit by an a and b), and the same measure of home range attraction.  It is this biased CRW that forms the basis of the breaking apart of the movement process into its constituent elements and provides the foundation for understanding links between empirical analysis of animal movement and theory.  Indeed, next week, in Lab 10, it is exactly this kind of simulation in the SSF that generates the spatial predictions of the expected utilization distribution, based on the 'bias' terms made explicity from the habitat selection and movement process. 
+
+But this week, we will get started with understanding the SSF components and process, ending with fitting models with conditional logistic regression models. 
+
+# Loading and importing data
+
+First let's load a set of basic habitat covariates, focusing on just topographic covariates and human access data from Banff National Park. We will focus just on continuous variables this week, and work on categories next week in SSF Lab 2.  We will bring them all in, then create a raster stack. 
+
+
+
+```{r, warning = F}
+elev<-rast("Data/elev.tif")
+slope<-rast("Data/slope.tif")
+d_human<-rast("Data/d_human.tif")
+d_high_human <-rast("Data/d_high_human.tif")
+
+habitat_stack<-c(elev, slope, d_human, d_high_human)
+plot(habitat_stack)
+#habitat_stack@layers
+```
+
+And then our elk telemetry data:
+```{r}
+elk_df <- read_csv("./data/elk_df.csv")
+```
+
+For some reason the `read_csv` function didn't parse the timestamp column as "datetime" format, so we'll manually convert it to POSIXct format, which is the date-time format that `amt` likes:
+```{r}
+elk_df$timestamp <- as.POSIXct(elk_df$timestamp, format = "%m/%d/%y %H:%M")
+elk_df
+```
+Now the "timestamp" column is formatted as a "datetime".
+
+# Data visualization and exploration 
+It's good to look at your data on a map and make sure nothing looks ridiculous. First, let's convert the data frame to an `sf` object so we can plot it a few different ways.
+```{r}
+elk_sf <- st_as_sf(elk_df,
+                   coords = c("lon","lat"), 
+                   crs = "EPSG:4326")
+elk_sf_UTM <- st_transform(elk_sf, crs = "+proj=utm +zone=11 +ellps=GRS80 +units=m +no_defs")
+```
+
+If we want to take a quick look at our elk data on an interactive map, we can plot it using `mapview` with a basemap of our choosing (there are a lot more basemap options and other ways to make this prettier.)
+```{r, eval=FALSE}
+mapview(elk_sf, zcol="id", legend = TRUE, cex=5, lwd=2, map.type = "Esri.DeLorme")
+```
+![Mapview Figure](Figures/Rplot_Line148.png)
+
+We can overlay our elk telemetry locations on the elevation raster:
+```{r}
+
+
+tmap_mode("plot")
+map <- tm_shape(habitat_stack$elev) + tm_raster()
+map + tm_shape(elk_sf_UTM) + tm_dots(col = "id", palette = "Dark2", n = 6)
+
+#plot(habitat_stack$elev)
+#points(elk_sf_UTM, pch=20, col=c("blue", "red", "green", "purple", "navy", "darkgreen")[as.factor(elk_sf_UTM$id)])
+```
+
+To get an idea of how many locations we have per individual:
+```{r}
+table(elk_df$id)
+```
+Note, here, I have created a subset of just 6 elk from our beloved elk GPS data. 
+
+# Creating and nesting an `amt` track
+We'll use the make_track function to do this. Our data is in WGS 84, so we'll specify that as the coordinate reference system ("+init=epsg:4326"), and then transform it to UTM because `amt` requires projected data rather than lon lat. 
+```{r}
+elk_trk <- amt::make_track(elk_df, .x=lon, .y=lat, .t=timestamp, id=id, crs = "EPSG:4326") %>%
+      amt::transform_coords("+proj=utm +zone=11 +ellps=GRS80 +units=m +no_defs")
+elk_trk
+```
+Notice here that `amt` only requires fields for **x**, **y** and **time**, but all other fields, including animal **id** are optional. I think this is to allow flexibility on how you want to analyze the data. 
+
+Obviously, because we are going to do SSF analyses, which are based on individual animal movement paths, we need to make sure we keep track of animal id. We can do this by nesting our data frame.
+
+Nesting our data frame creates list-columns, which may be difficult to get used to at first but are quite handy. Here's we'll nest by animal id. However, if we had already broken our data into seasons and wanted to model resource selection by season, we could nest by both animal id and season, like this: `nest(-id, -season)`
+```{r}
+elk_trk_nested <-
+  elk_trk %>% 
+  nest(-id)
+```
+
+This shows the first element in the "data" list-column, which is the location data for the first individual. 
+```{r}
+head(elk_trk_nested$data[[1]])
+```
+
+Check for duplicated time stamps and complete cases. for some functions of amt you need to ensure complete cases, and that there are no EXACTLY duplicated time stamps within a track, i.e., duplicated GPS locations.  These will yield errors. 
+```{r}
+all(complete.cases(elk_trk))
+any(duplicated(elk_trk$ts))
+```
+amt also has some additional functionality to calculate time of day, based on sun angle at that XY location and date based on the R package maptools. The helpfile for amt says time_of_day is a convenience wrapper around maptools::sunriset and maptools::crepuscule to extract if a fix was taken during day or night (optionally also include dawn and dusk).
+
+```{r}
+elk_trk <- time_of_day(elk_trk)
+head(elk_trk)
+table(elk_trk$tod_, elk_trk$id)
+```
+So, a nice mix of day and night locations between individuals. Trick Question: why are there more day locations?
+
+## `amt` Data Summaries and Visualization
+Before we create random "available" steps for each individual to use in an SSF analysis, we need to decide at what spatiotemporal scale we're going to do our analysis. To help us make this decision, we need to know our sampling rate, or the amount of time between successive locations. In many studies, GPS collars or tags will be set to different duty cycles. Some animals may have locations every 2 hours, while others every 13 hours, etc. These discrepancies can be challenging for modelling, because we'd like to model using a consistent spatiotemporal scale across individuals.  
+
+Let's see what our elk data look like. `amt`'s `summarize_sampling_rate` function gives us more information than we would ever want to know about the sampling interval, or time lag, between consecutive GPS locations. We'll add a new column called "lags".
+```{r}
+  elk_trk %>% 
+  nest(-id) %>% 
+  mutate(lags = map(data, summarize_sampling_rate))
+## lets take a look at some of the summary statistics
+elk_trk2 <-elk_trk_nested %>% 
+  mutate(lags = map(data, summarize_sampling_rate))
+elk_trk2$lags
+```
+Here, we see that there are on average a median of 2 hours between locations across our 6 individual elk. The "median" column is most useful here. 
+
+But we're just interested in seeing what's actually in the "lags" list-column. Because this column is nested, we can now "unnest" it to see our sampling rate summary.  Let's keep the "id" column too so we can see our animal ids.
+```{r}
+elk_trk %>% 
+  nest(data = -id) %>% 
+  mutate(lags = map(data, summarize_sampling_rate)) %>%
+    dplyr::select(-data) %>%
+  unnest(lags)
+```
+
+Luckily we have pretty consistent time lags of 2 hours across all individuals. So, the finest scale we can do an analysis would be at the 2-hr scale, which is probably something like between Johnson's 3rd to 4th order of selection.
+
+Here, we can use some more `amt` functions to calculate some simple movement statistics from our data. The `amt` package has a cool function called `time_of_day` which calculates whether a location is during the day or night based on the angle of the sun at the particular coordinates and the timestamp.
+```{r, warning=F}
+elk_trk_stats <- 
+  elk_trk %>% 
+  nest(data = -id) %>% 
+  mutate(speed = map(data, speed),
+         step_length = map(data, step_lengths),
+         tod_ = map(data, time_of_day), 
+         turn_angle = map(data, ~direction_rel(.) %>% as_degree(.))) %>%   dplyr::select(-data) %>% 
+  unchop(speed:turn_angle)
+```
+The warnings here just let us know that we have a lot of different units in the summary statistics we've created. Step lengths are in meters, speeds in meters/second, and turn angles in degrees bound between -180 and 180. Notice the first turning angle is NA. This is because we need three consecutive locations to calculate a relative turning angle.
+
+You can see there are NAs in "speed", "step_length" and "turn_angle":
+```{r}
+summary(elk_trk_stats)
+```
+Something strange happed with the summary statistics of time of day. 
+
+```{r}
+head(elk_trk_stats)
+str(elk_trk_stats$tod_)
+```
+where somehow time of day is being stored in the statistics file as a nested S3 track object itself. This will cause a few headaches later, and was a new exciting problem this year for me. 
+
+Nevertheless, look at some of the summary statistics to screen for errors. Does it seem possible that an elk could move 34km in 2 hours?  This is almost certainly in the back of a helicopter or truck. We should dig into the data more, screen out these erroneous locations, and repeat.  See also this paper:
+
+Bjorneraas, K., B. Van Moorter, C. M. Rolandsen, and I. Herfindal. 2010. Screening Global Positioning System Location Data for Errors Using Animal Movement Characteristics. Journal of Wildlife Management 74:1361-1366. https://doi.org/10.1111/j.1937-2817.2010.tb01258.x
+
+Regardless, lets look at some of the statistics graphically.
+
+## Summary plots
+```{r, warning=F}
+elk_trk_stats %>% 
+  ggplot(., aes(x = turn_angle, fill=id)) +  
+  geom_histogram(breaks = seq(-180,180, by=10))+
+  theme_classic() + 
+  ylab("Count") + 
+  ggtitle("Relative turn angles") + 
+  scale_x_continuous("", limits = c(-180, 180), breaks = seq(-180, 180, by=60),
+                     labels = seq(-180, 180, by=60)) +
+  facet_wrap(~id, scales="free") +
+  theme(legend.position = "none")
+```
+
+If you plot turn angles by individual, you might see a lot of irregularities, especially for those animals with relatively few locations, but if you pool turn angles across individuals, it should be a cleaner plot with a definite hump in the middle centered around 0, meaning the animal moves straight ahead more often than other directions. To see what it looks like, try running all but the last two lines of the previous code.
+
+```{r, warning=F}
+elk_trk_stats %>% 
+  ggplot(., aes(x = turn_angle)) +  
+  geom_histogram(breaks = seq(-180,180, by=10))+
+  theme_classic() + 
+  ylab("Count") + 
+  ggtitle("Relative turn angles") + 
+  scale_x_continuous("", limits = c(-180, 180), breaks = seq(-180, 180, by=60),
+                     labels = seq(-180, 180, by=60))
+```
+this is a very typical turning angle distribution showing directional persistence, i.e., animals tend to keep going in the same direction they were headed, 0 degrees.  And a lower frequency of about faces, 180 degree turns.  Les explore turning angles with polar plots. 
+
+```{r}
+elk_trk_stats %>% 
+  ggplot(., aes(x = turn_angle, y = ..density..)) +  
+  geom_histogram(breaks = seq(-180,180, by=20))+
+  coord_polar(start = 0)+
+  theme_classic() + 
+  ylab("Count") + 
+  ggtitle("Relative turn angles") + 
+  scale_x_continuous("", limits = c(-180, 180), breaks = seq(-180, 180, by=60), labels = seq(-180, 180, by=60))
+```
+
+```{r}
+elk_trk_stats %>% 
+  ggplot(., aes(x = turn_angle, y = ..density.., fill = id)) +  
+  geom_histogram(breaks = seq(-180,180, by=20))+
+  coord_polar(start = 0)+
+  theme_classic() + 
+  ylab("Count") + 
+  ggtitle("Relative turn angles") + 
+  scale_x_continuous("", limits = c(-180, 180), breaks = seq(-180, 180, by=60), labels = seq(-180, 180, by=60)) + facet_wrap( ~ id)
+```
+
+And we get a sense a bit of the differences in behaviour between individual animals is slight. 
+
+Next we can plot histograms of step lengths faceted by individual.
+```{r, warning=F}
+elk_trk_stats %>% 
+  ggplot(., aes(x = step_length, fill=id)) +  
+  geom_histogram(breaks = seq(0,4000, by=250))+
+  theme_classic() + 
+  ylab("Count") + 
+  ggtitle("Step lengths (m)") + 
+  scale_x_continuous("", limits = c(0, 4000), breaks = seq(0, 4000, by=1000),
+                     labels = seq(0, 4000, by=1000)) +
+  facet_wrap(~id, scales="free") +
+  theme(legend.position = "none")
+```
+
+This is the typical distribution we see for step lengths. Usually the animal takes shorter steps, and more rarely takes longer ones. The `amt` package fits a *gamma* distribution, which is a very flexible distribution, to step lengths and randomly samples from this distribution when creating "available" steps. However, there is some debate about whether it's more appropriate to randomly draw from the empirical (observed) step lengths rather than from a distributions fitted to those step lengths. Realistically the results are probably very similar with large enough sample sizes, but they could be very different with small sample sizes. 
+
+Next we can plot histograms of step lengths faceted by individual.
+```{r, warning=F}
+elk_trk_stats %>% 
+  ggplot(., aes(x = log(step_length), fill=id)) +  
+  geom_histogram(breaks = seq(0,10, by=0.5))+
+  theme_classic() + 
+  ylab("Count") + 
+  ggtitle("Step lengths (m)") + 
+  scale_x_continuous("", limits = c(0, 10), breaks = seq(0, 10, by=1),
+                     labels = seq(0, 10, by=1)) +
+  facet_wrap(~id, scales="free") +
+  theme(legend.position = "none")
+```
+
+So, movement rate is approximately log-normal. Remember this - there is never ever ever anything normal about movement rate parameters. 
+
+How about we see if animals move faster during the day versus at night.
+```{r, warning=F}
+ggplot(elk_trk_stats, aes(x = tod_[[4]], y = speed, fill=tod_[[4]])) + 
+  geom_violin() +
+  theme_bw() +
+  facet_wrap(~id, scales = "free") +
+  theme(legend.position = "none") +
+  ylab("speed (m/s)") +
+  xlab("time of day")
+```
+
+It's hard to see the differences because the data are so right skewed, so let's take the log of speed:
+```{r, warning=F}
+ggplot(elk_trk_stats, aes(x = tod_[[4]], y = log(speed), fill=tod_[[4]])) + 
+  geom_violin() +
+  theme_bw() +
+  facet_wrap(~id, scales = "free") +
+  theme(legend.position = "none") +
+  ylab("log(speed)") +
+  xlab("time of day")
+```
+Seems reasonable that they move a bit faster during the day.
+
+# Prepare SSF data frame by individual
+Now we could create "available" steps by sampling from the distributions of step lengths and turning angles in the `elk_trk` object but if we did that, we'd be assuming that each individual had similar step length and turn angle distributions, and we'd wash over any **individual variation**. If we want to capture individual variation, we should probably create **separate tracks** for each individual, which means that we will then fit separate distributions to turn angles and step lengths for **each individual**. To do this, we will nest the dataframe **BEFORE** we use the amt `make_track` function. We're merging a few steps into a function (with argument "d") and adding the output from this function (our `amt` track) in a new column called "trk". 
+
+```{r}
+elk_trk_id <- 
+  elk_df %>% 
+  nest(-id) %>% 
+  mutate(trk = map(data, function(d) {
+    make_track(d, lon, lat, timestamp, crs = "EPSG:4326") %>%
+      transform_coords("+proj=utm +zone=11 +ellps=GRS80 +units=m +no_defs")
+  }))
+```
+
+Now we've made six tracks, one for each individual.
+```{r}
+elk_trk_id
+```
+
+The "data" list-column has all our original data, and the "trk" list-column has our data in `amt`'s `track_xyt` format. Just to remind ourselves, let's look at the first element (first animal) in the "trk" list-column.
+```{r}
+elk_trk_id$trk[[1]]
+```
+
+ 
+## Create available steps and extract covariates
+Alright, there's a lot going on in this next chunk of code, so we'll go throughout it piece by piece. Within the mutate call, we use `purrr::map` to apply a number of `amt` functions to the "trk" list column we created above.  
+  
+Learn more about `steps_by_burst`
+
+`step_lengths can be use to calculate step lengths of a track. direction_abs and direction_rel calculate the absolute and relative direction of steps. steps converts a track_xy* from a point representation to a step representation and automatically calculates step lengths and relative turning angles.`
+  
+In order, the functions are:  
+
+(1) Resampling (or regularizing) our track so we have regular intervals between consecutive locations (in this case every two hours, with a 20 minute tolerance). When there is a interval between successive locations that is more or less than that 2 hour period, locations before and after that time gap will be placed into different **bursts**. Step lengths and turning angles will not be calculated across bursts, only within them.  
+
+Learn more about this step here: `?track_resample`
+
+(2) Only retain bursts with at least 3 locations, because we need a minimum of three locations to calculate relative turn angles.  
+
+learn more here: `?filter_min_n_burst`
+
+(3) Creates steps (only within a burst!) between used locations. This automatically calculates step lengths and turn angles.  
+
+`?steps_by_burst`
+
+(4) Creates 3 random "available" steps per used step. You could choose more but 3 is good for now.
+`random_steps`
+
+(5) Extracts the covariate values (for all layers in the raster stack) at the endpoint of each step. You could extract values at the beginning point of each step too. It shouldn't make much difference (but you could try it and see!)
+`extract_covariates`. For this function we have to change the object `habitat_stack` from a SpatRaster (created by terra) to a Raster object using package `raster``
+
+```{r, warning=F}
+habitat_stack_layer <- as(habitat_stack, "Raster")
+
+ssf_2_hr <- elk_trk_id %>%
+  mutate(steps_2_hr = purrr::map(trk, function(x) {
+    x %>%
+      track_resample(rate = minutes(120), tolerance = minutes(20)) %>%
+      filter_min_n_burst(min_n = 3) %>%
+      steps_by_burst(diff_time_units = "hours") %>%
+      random_steps(n = 3) %>% 
+      extract_covariates(habitat_stack_layer, where = "end")
+  })) %>%
+  dplyr::select(id, steps_2_hr) %>%
+  unnest() 
+head(ssf_2_hr)
+```
+
+So, we are doing a *point-based* SSF rather than a *path-based* SSF. [Daniel Fortin et al.'s SSF paper from 2005](https://esajournals.onlinelibrary.wiley.com/doi/full/10.1890/04-0953) is an example of a path-based SSF. 
+
+Take a look at what we just created above with that monster chunk of code.
+```{r}
+print(ssf_2_hr, width=Inf)
+```
+There seems to be a lot of zeros in the "d_high_human" column, which makes me think something might not be right with that layer, so I'm just not going to include it in our simple model below.  
+
+Visualizing the SSF sampling for a zoomed in portion of our study area:
+```{r, warning=F}
+ggplot(ssf_2_hr, aes(x=x2_, y= y2_, colour = case_)) + geom_point() + geom_path()+ xlim(550000, 560000) + ylim(5700000, 5710000)
+```
+
+Ignore the connected FALSE (random) points, but the blue paths between GPS locations gives you a sense of the path, and, the random points the sampling distribution. Compare this conceptually to a home-range based 3rd order scale sampling regime for availability. What would differ? How would the range of availability differ between a 3rd order with a MCP, Kernel, and then this step selection scale of sampling?? 
+
+## Univariate Plotting of Used versus Available Points
+
+Now that we have available steps, we can do a quick plot of slope for "used" versus available "points"
+```{r, warning=F}
+ggplot(ssf_2_hr, aes(x = case_, y = slope, fill=case_)) + 
+  geom_violin() +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ylab("slope (m)") +
+  xlab("")
+```
+Looks like they might barely be selecting lower slopes, which is probably what we'd expect...Lets continue our graphical exploration of the other covariates
+
+```{r, warning=F}
+ggplot(ssf_2_hr, aes(x = case_, y = elev, fill=case_)) + 
+  geom_violin() +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ylab("slope (m)") +
+  xlab("")
+```
+
+Similarly, slight selection probably for lower elevations.
+
+```{r, warning=F}
+ggplot(ssf_2_hr, aes(x = case_, y = d_human, fill=case_)) + 
+  geom_violin() +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ylab("slope (m)") +
+  xlab("")
+```
+
+Looks like they might barely be selecting lower slopes, which is probably what we'd expect...
+
+# Running an SSF model in `amt`
+
+Before running our model, we need to create a "stratum" field, which is a unique identifier for each set of "used" and "available" points. This is because conditional logistic regression estimates relative probability of use conditioned on resources available at a given time step. To create this "stratum" field we'll just combine the animal "id" field" with the "step_id_" field.
+
+```{r}
+ssf_2_hr$stratum <- paste(ssf_2_hr$id, ssf_2_hr$burst_, ssf_2_hr$step_id_)
+head(ssf_2_hr$stratum)
+```
+So what this does is make each elk GPS location, and, its 'random samples' a stratum. 
+
+We can simplify our dataframe and name it our "raw" dataframe because has unscaled covariate values. We might fit a model using this dataframe if we were making a predictive map of selection (which is definitely a challenge in an SSF framework)!
+```{r}
+ssf_2_hr_raw <-
+  ssf_2_hr %>%
+  dplyr::select(id, case_, t2_, elev, slope, d_human, d_high_human, step_id_, stratum)
+```
+
+Then we can scale and center our variables so it's easier to interpret selection coefficients across continuous covariates with different units (in our simple analysis, they're all in meters, but that's not always the case).
+```{r}
+ssf_2_hr_scaled <-
+  ssf_2_hr_raw %>%
+  mutate(
+    elev = as.numeric(scale(elev)),
+    slope = as.numeric(scale(slope)),
+    d_human = as.numeric(scale(d_human)),
+    d_high_human = as.numeric(scale(d_high_human))
+  )
+```
+
+## Fitting SSFs with clogit in R
+
+Next, we will fit a 'naive' clogit model, that is, a model that does not account for any differences between individuals and treats all step_id_'s as independent.Basically ignoring any random effects structure of individual fishers in this case. In Lab 10, next week, we will build complexity into SSF models with  mixed-effects.  But it takes a bit of learning to understand how R uses survival models to fit a conditional logistic regression model.  Here, I borrow from:
+_from https://rdrr.io/cran/survival/man/clogit.html_ 
+
+It turns out that the loglikelihood for a conditional logistic regression model = loglik from a Cox proportional hazards model with a particular data structure. Proving this is a nice homework exercise for a PhD statistics class; not too hard, but the fact that it is true is surprising.
+
+When a well tested Cox PH model routine is available many packages use this ‘trick’ rather than writing a new software routine for the conditional likelihood of a clogit model from scratch, and this is what the clogit routine does. In detail, we use a stratified Cox model with each case/control group assigned to its own stratum, _time set to a constant_, status of 1=case 0=control, and using the exact partial likelihood has the same likelihood formula as a conditional logistic regression. The clogit routine creates the necessary dummy variable of times (all 1) and the strata, then calls coxph.
+
+Learn more about clogit 
+`?clogit`
+
+Here's a simple model with three covariates (no distance to high human access). You'll see the "strata" argument in here, where we tell `clogit` what field has the unique id for matched sets of used and available points.  
+
+We are using the "cluster" argument in `survival::clogit` to cluster locations by individual id. Mark may talk about this more, but basically this is a very conservative way to account for non-independence of observations within an individual. It calculates robust standard errors for coefficient estimates. These robust standard errors are larger than the normal standard errors. A more rigorous analysis would be to do a mixed effects SSF and have a random effect for individual, but that's for Mark to teach!
+```{r}
+ssf_model <- 
+  clogit(case_ ~ elev + slope + d_human +  
+           strata(stratum) + cluster(id), method = "approximate", data = ssf_2_hr_scaled)
+summary(ssf_model)
+```
+
+You can see the robust standard errors in the summary output.
+
+And finally, a very quick and dirty plot of the coefficients using the `sjPlot` package. Note that by default, `plot_model` is plotting the exponentiated coefficients, so 1 is the cutoff between selection and avoidance, rather than 0. We will plot the raw coefficients by specifying no transformation:
+```{r}
+plot_model(ssf_model, title="SSF Coefficients", transform = NULL)
+```
+
+Obviously, this isn't an exciting model, but you could infer that elk are selecting areas closer to humans (negative coefficent for distance) and lower slopes, but the elevation results are pretty equivocal. You could try adding quadratic terms and interactions to represent different hypotheses, but you'd probably want to add some better covariates to make any stronger inference about elk resource selection with these data.
+
+## Comparing to a Naive Logistic Regression
+
+Note that we can analyze the same dataset, ignoring the conditioning of space in the movement path of the animal by ignoring stratum and fitting a glm. 
+
+Lets compare the model coefficients from the ssf_model and rsf_model. We will just fit a simple glmm model with a random intercept for individual elk id, and not bother too much for now with glmmTMB, random coefficients, etc. 
+
+```{r}
+glmm_model = glmer(case_ ~ elev + slope + d_human + (1|id), data=ssf_2_hr_scaled, family=binomial(link="logit"))
+summary(glmm_model)
+plot_model(ssf_model, transform = NULL)
+plot_model(glmm_model, transform = NULL)
+coef(ssf_model)
+fixef(glmm_model)
+```
+How do we interpret the differences between these models?  In the SSF model, the coefficient for elevation was + 0.1058, but in the RSF model, the coefficient was +0.05. So the sign was the same, but, half the magnitude. To understand the differences between models, remind yourselves of the assumption of the RSF vs SSF models. RSF models assume independence amongst all locations, so that its more of a theoretical preference/selectivity calculation ASSUMING the animal can choose amongst all available locations.  In the clogit, we have constrained the likelihood to be conditioned on each step (stratum).  That the coefficient is double in strength means that they show stronger selection for elevation along the path scale than the entire seasonal home range scale.  
+
+Similarly, the coefficient for Slope is stronger at the SSF scale, and likewise for being close to human activity.  The differences between 'scales' here is not 'wrong', but simply reflects the scale dependence of the SSF process at 2 hours compared to the entire seasonal summer range of these individual elk.  Learning to understand and compare inferences about selection by comparing estimates from conditioned and unconditioned sampling of availability will help you understand what SSF models do in your own studies. 
+
+## Interpreting Clogit Models
+
+We can make the same sorts of interpretations of the coefficients from clogit models as the exponential model of an RSF.  First, we can estimate the log-odds by exponentiating:
+```{r}
+exp(coef(ssf_model))
+```
+This tells us that for every increase in elevation by 1 standard deviation, the odds of elk use increase by 1.11. Etc. 
+
+## Predicting
+
+We can use standard post-estimtion commands like predict, type = "expected" to get the predicted relative probability of selection by elk as a function of the covariates.  I'll then plot it to start exploring whether we think there are any differences, really, amongst elk here to explore thinking ahead to next week when we add random effects. 
+
+```{r warning = FALSE, message=F}
+ssf_2_hr_scaled$predSSF <- predict(ssf_model, type = "expected")
+hist(ssf_2_hr_scaled$predSSF)
+plot(ssf_2_hr_scaled$elev, ssf_2_hr_scaled$predSSF)
+ggplot(ssf_2_hr_scaled, aes(x=elev, y = predSSF, colour = id)) + stat_smooth(method="glm", method.args = list(family="binomial"))
+```
+
+Note the Y axis here is the relative predicted probabilitiy of selection 
+We can explore for the other covariates, slope and d_human
+```{r warning = FALSE, message=F}
+ggplot(ssf_2_hr_scaled, aes(x=slope, y = predSSF, colour = id)) + stat_smooth(method="glm", method.args = list(family="binomial"))
+
+ggplot(ssf_2_hr_scaled, aes(x=d_human, y = predSSF, colour = id)) + stat_smooth(method="glm", method.args = list(family="binomial"))
+
+```
+
+## Model selection in SSF models
+
+We can also do SSF models easily on different clogit models. 
+```{r}
+ssf_model1 <- clogit(case_ ~ elev + strata(stratum) + cluster(id), method = "approximate", data = ssf_2_hr_scaled)
+
+ssf_model2 <- clogit(case_ ~ elev + slope + strata(stratum) + cluster(id), method = "approximate", data = ssf_2_hr_scaled)
+
+ssf_model3 <- clogit(case_ ~ elev + d_human + strata(stratum) + cluster(id), method = "approximate", data = ssf_2_hr_scaled)
+
+ssf_model4 <- clogit(case_ ~ d_human + strata(stratum) + cluster(id), method = "approximate", data = ssf_2_hr_scaled)
+
+AIC(ssf_model, ssf_model1, ssf_model2, ssf_model3, ssf_model4)
+```
+However, we cannot use AIC to compare clogit models to glm models for the same data, but without conditioning. 
+
+```{r}
+AIC(glmm_model, ssf_model)
+```
+
+# Literature
+Compton, B. W., J. M. Rhymer, and M. McCollough. 2002. Habitat selection by wood turtles (Clemmys insculpta): An application of paired logistic regression. Ecology 83:833-843.
+
+Forester, J. D., H. K. Im, and P. J. Rathouz. 2009. Accounting for animal movement in estimation of resource selection functions: sampling and data analysis. Ecology 90:3554-3565.
+
+Skellam, J. G. 1951. Random dispersal in theoretical populations. Biometrika 38:196-218.
+
+Thurfjell, H., S. Ciuti, and M. S. Boyce. 2014. Applications of step-selection functions in ecology and conservation. Movement Ecology 2:4.
+
+Turchin, P. 1998. Quantitative analysis of movement: measuring and modeling population redistribution in animals and plants. Sinauer Associates, Inc., Sunderland, Massachusetts.
+
+Whittington, J., C. C. St Clair, and G. Mercer. 2005. Spatial Responses of Wolves to Roads and Trails in Mountain Valleys. Ecological Applications 15:543-553.
+
+```{r eval=FALSE, include=FALSE}
+ 
+knitr::purl(input = "README.Rmd", output = "lab9.R", documentation = 1)
+
+```
+
