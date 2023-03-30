@@ -56,7 +56,7 @@ This correlated random walk model was comprised of steps and turns, and Kareiva 
 
 In this first excercise, we will explore how different 'parameters' of movement (step, turns) and bias towards a centroid influence the spatial pattern of movement.  In essence, the BCRW is the driver of the movement kernel distribution in the iSSF models we will use from the package amt. 
 
-First, we make a function that draws random movements based on 3 parameters, a, b, rho (the degree of correaltion), and an attraction to a home range activity center.  a and b are parameters of the step lenght distribution, fit as a Weibull distribution. Larger values of a or b represent more or less longer step lenghts.  Rho is the degree of directional persistence or 'bias' in the correlation in direction between steps, and the attraction is equivalent to the mathematical advection term in Moorcroft and Barnett.  
+First, we make a function that draws random movements based on 3 parameters, a, b, rho (the degree of correlation), and an attraction to a home range activity center.  a and b are parameters of the step length distribution, fit as a Weibull distribution. Larger values of a or b represent more or less longer step lenghts.  Rho is the degree of directional persistence or 'bias' in the correlation in direction between steps, and the attraction is equivalent to the mathematical advection term in Moorcroft and Barnett.  
 
 Here, we will compare just 3 types of fits to explore, but I encourage you to play around with the paramters on your own to get a feel for unbiased and biased correlated random walks. 
 ```{r crw}
@@ -88,7 +88,7 @@ BCRW <- function(a = 2, b = 1, rho = 0.7, Z.center = 0, attraction = 0.5, n = 50
 
 BCRW(a = 2, b = 1, rho = 0, Z.center = 10, attraction = 0.25, n = 2000) %>% 
   plot(type="o", asp=1, pch = 21, bg= grey(seq(0,1,length = 2000)),
-       main = "a = 2, b = 1, rho = 0.2, attraction = 0")
+       main = "a = 2, b = 1, rho = 0.2, attraction = 0.25")
 
 BCRW(a = 2, b = 1, rho = 0.5, Z.center = 10, attraction = 0.25, n = 2000) %>% 
   plot(type="o", asp=1, pch = 21, bg= grey(seq(0,1,length = 200)),
@@ -181,7 +181,7 @@ Nesting our data frame creates list-columns, which may be difficult to get used 
 ```{r}
 elk_trk_nested <-
   elk_trk %>% 
-  nest(-id)
+  nest(data=-id)
 ```
 
 This shows the first element in the "data" list-column, which is the location data for the first individual. 
@@ -192,12 +192,12 @@ head(elk_trk_nested$data[[1]])
 Check for duplicated time stamps and complete cases. for some functions of amt you need to ensure complete cases, and that there are no EXACTLY duplicated time stamps within a track, i.e., duplicated GPS locations.  These will yield errors. 
 ```{r}
 all(complete.cases(elk_trk))
-any(duplicated(elk_trk$ts))
+any(duplicated(elk_trk$t_))
 ```
 amt also has some additional functionality to calculate time of day, based on sun angle at that XY location and date based on the R package maptools. The helpfile for amt says time_of_day is a convenience wrapper around maptools::sunriset and maptools::crepuscule to extract if a fix was taken during day or night (optionally also include dawn and dusk).
 
 ```{r}
-elk_trk <- time_of_day(elk_trk)
+elk_trk <- amt::time_of_day(elk_trk) # day or night
 head(elk_trk)
 table(elk_trk$tod_, elk_trk$id)
 ```
@@ -209,7 +209,7 @@ Before we create random "available" steps for each individual to use in an SSF a
 Let's see what our elk data look like. `amt`'s `summarize_sampling_rate` function gives us more information than we would ever want to know about the sampling interval, or time lag, between consecutive GPS locations. We'll add a new column called "lags".
 ```{r}
   elk_trk %>% 
-  nest(-id) %>% 
+  nest(data = -id) %>% 
   mutate(lags = map(data, summarize_sampling_rate))
 ## lets take a look at some of the summary statistics
 elk_trk2 <-elk_trk_nested %>% 
@@ -373,7 +373,7 @@ Now we could create "available" steps by sampling from the distributions of step
 ```{r}
 elk_trk_id <- 
   elk_df %>% 
-  nest(-id) %>% 
+  nest(data=-id) %>% 
   mutate(trk = map(data, function(d) {
     make_track(d, lon, lat, timestamp, crs = "EPSG:4326") %>%
       transform_coords("+proj=utm +zone=11 +ellps=GRS80 +units=m +no_defs")
@@ -533,7 +533,7 @@ We are using the "cluster" argument in `survival::clogit` to cluster locations b
 ssf_model <- 
   clogit(case_ ~ elev + slope + d_human +  
            strata(stratum) + cluster(id), method = "approximate", data = ssf_2_hr_scaled)
-summary(ssf_model)
+summary(ssf_model) #cluster(id) is close to adding a random effect for individual
 ```
 
 You can see the robust standard errors in the summary output.
